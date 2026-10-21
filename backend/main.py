@@ -436,12 +436,53 @@ async def chat_stream(payload: ChatRequest, user=Depends(current_user)):
 async def anilist_proxy(payload: GraphQLRequest):
     try:
         async with httpx.AsyncClient(timeout=20.0) as client:
-            response = await client.post(ANILIST_URL, json={"query": payload.query, "variables": payload.variables}, headers={"Content-Type": "application/json", "Accept": "application/json"})
+            response = await client.post(
+                ANILIST_URL,
+                json={
+                    "query": payload.query,
+                    "variables": payload.variables,
+                },
+                headers={
+                    "Content-Type": "application/json",
+                    "Accept": "application/json",
+                    "User-Agent": "NekoAnime/1.0 (https://neko-1-pp28.onrender.com)",
+                },
+            )
+
         response.raise_for_status()
         data = response.json()
-        if "errors" in data: raise HTTPException(status_code=502, detail="AniList returned a GraphQL error.")
+
+        if "errors" in data:
+            raise HTTPException(
+                status_code=502,
+                detail="AniList returned a GraphQL error.",
+            )
+
         return data
-    except HTTPException: raise
-    except httpx.TimeoutException: raise HTTPException(status_code=504, detail="AniList request timed out.")
-    except httpx.HTTPStatusError as exc: raise HTTPException(status_code=502, detail=f"AniList returned HTTP {exc.response.status_code}.")
-    except httpx.RequestError: raise HTTPException(status_code=502, detail="Could not reach AniList.")
+
+    except HTTPException:
+        raise
+
+    except httpx.TimeoutException:
+        print("AniList request timed out.")
+        raise HTTPException(
+            status_code=504,
+            detail="AniList request timed out.",
+        )
+
+    except httpx.HTTPStatusError as exc:
+        print(
+            f"AniList HTTP {exc.response.status_code}: "
+            f"{exc.response.text[:500]}"
+        )
+        raise HTTPException(
+            status_code=502,
+            detail=f"AniList returned HTTP {exc.response.status_code}.",
+        )
+
+    except httpx.RequestError as exc:
+        print(f"AniList connection failed: {type(exc).__name__}: {exc}")
+        raise HTTPException(
+            status_code=502,
+            detail="Could not reach AniList.",
+        )
