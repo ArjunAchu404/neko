@@ -432,7 +432,7 @@ async def chat_stream(payload: ChatRequest, user=Depends(current_user)):
     return StreamingResponse(events(), media_type="text/event-stream", headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"})
 
 
-def _jikan_date_parts(value):
+def _tenrai_date_parts(value):
     """Convert an ISO date string into AniList-style date parts."""
     if not value:
         return {"year": None, "month": None, "day": None}
@@ -443,8 +443,8 @@ def _jikan_date_parts(value):
         return {"year": None, "month": None, "day": None}
 
 
-def _jikan_anime_to_anilist(item: dict[str, Any]) -> dict[str, Any]:
-    """Map Jikan's anime object to the AniList fields used by Neko's frontend."""
+def _tenrai_anime_to_anilist(item: dict[str, Any]) -> dict[str, Any]:
+    """Map Tenrai's anime object to the AniList fields used by Neko's frontend."""
     images = item.get("images") or {}
     jpg = images.get("jpg") or {}
     webp = images.get("webp") or {}
@@ -479,8 +479,8 @@ def _jikan_anime_to_anilist(item: dict[str, Any]) -> dict[str, Any]:
         "status": status,
         "season": season,
         "seasonYear": item.get("year"),
-        "startDate": _jikan_date_parts(aired.get("from")),
-        "endDate": _jikan_date_parts(aired.get("to")),
+        "startDate": _tenrai_date_parts(aired.get("from")),
+        "endDate": _tenrai_date_parts(aired.get("to")),
         "averageScore": round(float(item.get("score") or 0) * 10) if item.get("score") else None,
         "popularity": item.get("popularity"),
         "favourites": item.get("favorites"),
@@ -495,37 +495,37 @@ def _jikan_anime_to_anilist(item: dict[str, Any]) -> dict[str, Any]:
     }
 
 
-async def _jikan_fallback(payload: GraphQLRequest) -> dict[str, Any]:
-    """Serve the subset of AniList-shaped responses Neko currently requests, via Jikan."""
+async def _tenrai_fallback(payload: GraphQLRequest) -> dict[str, Any]:
+    """Serve the subset of AniList-shaped responses Neko currently requests, via Tenrai."""
     query = payload.query or ""
     variables = payload.variables or {}
     page = max(1, min(int(variables.get("page") or 1), 100))
     per_page = max(1, min(int(variables.get("perPage") or 18), 25))
     async with httpx.AsyncClient(timeout=20.0, headers={"Accept": "application/json", "User-Agent": "NekoAnime/1.0 (https://neko-1-pp28.onrender.com)"}) as client:
-        # Details: the fallback assigns Jikan/MAL IDs to the AniList-shaped `id` field.
+        # Details: the fallback assigns Tenrai/MAL IDs to the AniList-shaped `id` field.
         if re.search(r"\bMedia\s*\(", query) and variables.get("id") is not None:
-            response = await client.get(f"https://api.jikan.moe/v4/anime/{int(variables['id'])}/full")
+            response = await client.get(f"https://api.tenrai.org/v1/anime/{int(variables['id'])}/full")
             response.raise_for_status()
             item = (response.json() or {}).get("data") or {}
-            return {"data": {"Media": _jikan_anime_to_anilist(item)}}
+            return {"data": {"Media": _tenrai_anime_to_anilist(item)}}
 
         if variables.get("search") or re.search(r"media\s*\(\s*search\s*:", query, re.I):
             params = {"page": page, "limit": per_page, "order_by": "popularity", "sort": "desc", "sfw": "true"}
             if variables.get("search"):
                 params["q"] = str(variables["search"])[:100]
-            response = await client.get("https://api.jikan.moe/v4/anime", params=params)
+            response = await client.get("https://api.tenrai.org/v1/anime", params=params)
         elif "season" in query.lower() and ("seasonYear" in query or "season:" in query.lower()):
-            response = await client.get("https://api.jikan.moe/v4/seasons/now", params={"page": page, "limit": per_page, "sfw": "true"})
+            response = await client.get("https://api.tenrai.org/v1/seasons/now", params={"page": page, "limit": per_page, "sfw": "true"})
         else:
-            # Trending/popular homepage fallback. Jikan's public API is read-only.
-            response = await client.get("https://api.jikan.moe/v4/top/anime", params={"page": page, "limit": per_page, "filter": "bypopularity", "sfw": "true"})
+            # Trending/popular homepage fallback. Tenrai's public API is read-only.
+            response = await client.get("https://api.tenrai.org/v1/top/anime", params={"page": page, "limit": per_page, "filter": "bypopularity", "sfw": "true"})
         response.raise_for_status()
         body = response.json() or {}
         items = body.get("data") or []
         pagination = body.get("pagination") or {}
         current_page = (pagination.get("current_page") or page)
         last_page = pagination.get("last_visible_page") or current_page
-        media = [_jikan_anime_to_anilist(item) for item in items]
+        media = [_tenrai_anime_to_anilist(item) for item in items]
         return {"data": {"Page": {"pageInfo": {
             "currentPage": current_page,
             "hasNextPage": current_page < last_page,
@@ -537,7 +537,7 @@ async def _jikan_fallback(payload: GraphQLRequest) -> dict[str, Any]:
 
 @app.post("/api/anilist")
 async def anilist_proxy(payload: GraphQLRequest):
-    """Try AniList first; use Jikan if AniList is temporarily unavailable."""
+    """Try AniList first; use Tenrai if AniList is temporarily unavailable."""
     try:
         async with httpx.AsyncClient(timeout=20.0) as client:
             response = await client.post(
@@ -552,40 +552,40 @@ async def anilist_proxy(payload: GraphQLRequest):
         if response.is_error:
             print(f"AniList HTTP {response.status_code}: {response.text[:500]}")
             if response.status_code in (403, 429, 500, 502, 503, 504):
-                print("AniList unavailable; trying Jikan fallback.")
+                print("AniList unavailable; trying Tenrai fallback.")
                 try:
-                    return await _jikan_fallback(payload)
+                    return await _tenrai_fallback(payload)
                 except httpx.HTTPStatusError as fallback_exc:
-                    print(f"Jikan HTTP {fallback_exc.response.status_code}: {fallback_exc.response.text[:400]}")
-                    raise HTTPException(status_code=502, detail="AniList is unavailable and the Jikan fallback also returned an error.")
+                    print(f"Tenrai HTTP {fallback_exc.response.status_code}: {fallback_exc.response.text[:400]}")
+                    raise HTTPException(status_code=502, detail="AniList is unavailable and the Tenrai fallback also returned an error.")
                 except httpx.TimeoutException:
-                    raise HTTPException(status_code=504, detail="AniList is unavailable and the Jikan fallback timed out.")
+                    raise HTTPException(status_code=504, detail="AniList is unavailable and the Tenrai fallback timed out.")
                 except httpx.RequestError as fallback_exc:
-                    print(f"Jikan connection failed: {type(fallback_exc).__name__}: {fallback_exc}")
-                    raise HTTPException(status_code=502, detail="AniList is unavailable and the Jikan fallback could not be reached.")
+                    print(f"Tenrai connection failed: {type(fallback_exc).__name__}: {fallback_exc}")
+                    raise HTTPException(status_code=502, detail="AniList is unavailable and the Tenrai fallback could not be reached.")
             response.raise_for_status()
         data = response.json()
         if "errors" in data:
             print(f"AniList GraphQL errors: {json.dumps(data.get('errors'))[:500]}")
             try:
-                return await _jikan_fallback(payload)
+                return await _tenrai_fallback(payload)
             except (httpx.HTTPStatusError, httpx.TimeoutException, httpx.RequestError) as fallback_exc:
-                print(f"Jikan fallback failed: {type(fallback_exc).__name__}: {fallback_exc}")
-                raise HTTPException(status_code=502, detail="AniList returned a GraphQL error and the Jikan fallback failed.")
+                print(f"Tenrai fallback failed: {type(fallback_exc).__name__}: {fallback_exc}")
+                raise HTTPException(status_code=502, detail="AniList returned a GraphQL error and the Tenrai fallback failed.")
         return data
     except HTTPException:
         raise
     except httpx.TimeoutException:
-        print("AniList request timed out; trying Jikan fallback.")
+        print("AniList request timed out; trying Tenrai fallback.")
         try:
-            return await _jikan_fallback(payload)
+            return await _tenrai_fallback(payload)
         except (httpx.HTTPStatusError, httpx.TimeoutException, httpx.RequestError) as fallback_exc:
-            print(f"Jikan fallback failed: {type(fallback_exc).__name__}: {fallback_exc}")
-            raise HTTPException(status_code=502, detail="AniList timed out and the Jikan fallback failed.")
+            print(f"Tenrai fallback failed: {type(fallback_exc).__name__}: {fallback_exc}")
+            raise HTTPException(status_code=502, detail="AniList timed out and the Tenrai fallback failed.")
     except httpx.RequestError as exc:
-        print(f"AniList connection failed: {type(exc).__name__}: {exc}; trying Jikan fallback.")
+        print(f"AniList connection failed: {type(exc).__name__}: {exc}; trying Tenrai fallback.")
         try:
-            return await _jikan_fallback(payload)
+            return await _tenrai_fallback(payload)
         except (httpx.HTTPStatusError, httpx.TimeoutException, httpx.RequestError) as fallback_exc:
-            print(f"Jikan fallback failed: {type(fallback_exc).__name__}: {fallback_exc}")
-            raise HTTPException(status_code=502, detail="Could not reach AniList or the Jikan fallback.")
+            print(f"Tenrai fallback failed: {type(fallback_exc).__name__}: {fallback_exc}")
+            raise HTTPException(status_code=502, detail="Could not reach AniList or the Tenrai fallback.")
