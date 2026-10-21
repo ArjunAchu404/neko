@@ -242,6 +242,54 @@ def local_action_url(path: str, raw: str) -> str:
     return f"{frontend}/?{path}={raw}"
 
 
+async def send_brevo_email(recipient: str, subject: str, html_content: str, text_content: str) -> bool:
+    """Send a transactional email via Brevo. Returns False if not configured or delivery API fails."""
+    api_key = os.getenv("BREVO_API_KEY", "").strip()
+    sender_email = os.getenv("BREVO_SENDER_EMAIL", "").strip()
+    sender_name = os.getenv("BREVO_SENDER_NAME", "Neko").strip() or "Neko"
+    if not api_key or not sender_email:
+        print("[NEKO EMAIL] Brevo is not configured; email was not sent.")
+        return False
+
+    payload = {
+        "sender": {"name": sender_name, "email": sender_email},
+        "to": [{"email": recipient}],
+        "subject": subject,
+        "htmlContent": html_content,
+        "textContent": text_content,
+    }
+    try:
+        async with httpx.AsyncClient(timeout=12.0) as client:
+            response = await client.post(
+                "https://api.brevo.com/v3/smtp/email",
+                headers={"api-key": api_key, "accept": "application/json", "content-type": "application/json"},
+                json=payload,
+            )
+        if response.is_success:
+            print(f"[NEKO EMAIL] Brevo accepted email for {recipient}.")
+            return True
+        # Do not log credentials or the verification URL/token.
+        print(f"[NEKO EMAIL] Brevo returned HTTP {response.status_code}: {response.text[:300]}")
+    except httpx.TimeoutException:
+        print("[NEKO EMAIL] Brevo request timed out.")
+    except httpx.HTTPError as exc:
+        print(f"[NEKO EMAIL] Brevo request failed: {type(exc).__name__}")
+    return False
+
+
+async def send_verification_email(recipient: str, verification_url: str) -> bool:
+    html = (
+        "<div style=\"font-family:Arial,sans-serif;max-width:560px;margin:auto;color:#24212e\">"
+        "<h1>Welcome to Neko!</h1><p>Confirm your email address to activate your Neko account.</p>"
+        f"<p><a href=\"{verification_url}\" style=\"display:inline-block;padding:12px 18px;background:#7857e8;color:white;text-decoration:none;border-radius:8px\">Verify email</a></p>"
+        "<p>If the button does not work, open this link:</p>"
+        f"<p><a href=\"{verification_url}\">{verification_url}</a></p>"
+        "<p>This link expires in 24 hours. If you did not create a Neko account, ignore this email.</p></div>"
+    )
+    text = f"Welcome to Neko! Verify your email using this link (expires in 24 hours): {verification_url}\nIf you did not create a Neko account, ignore this email."
+    return await send_brevo_email(recipient, "Verify your Neko email", html, text)
+
+
 @app.post("/api/auth/signup")
 async def signup(payload: AuthPayload):
     if len(payload.password) < 8:
@@ -255,9 +303,17 @@ async def signup(payload: AuthPayload):
     except sqlite3.IntegrityError:
         raise HTTPException(status_code=409, detail="An account with this email already exists. Try signing in.")
     raw = create_action_token(user_id, "verify_email", 60 * 24)
-    # Development fallback: use a real SMTP provider in production.
-    print(f"[NEKO EMAIL VERIFICATION] {local_action_url('verify_email', raw)}")
-    return {"needs_verification": True, "message": "Account created. Open the verification link printed in the backend terminal.", "email": payload.email}
+    verification_url = local_action_url("verify_email", raw)
+    sent = await send_verification_email(payload.email, verification_url)
+    if not sent:
+        # Keep the token valid so the user can retry with Resend verification email.
+        print(f"[NEKO EMAIL VERIFICATION FALLBACK] {verification_url}")
+    message = (
+        "Account created. Check your inbox for the Neko verification email."
+        if sent else
+        "Account created, but we could not send the verification email. Please use Resend verification email or try again later."
+    )
+    return {"needs_verification": True, "message": message, "email": payload.email}
 
 
 @app.post("/api/auth/verify-email")
@@ -279,8 +335,11 @@ async def resend_verification(payload: EmailPayload):
         row = conn.execute("SELECT id,email_verified FROM users WHERE email=? COLLATE NOCASE", (payload.email,)).fetchone()
     if row and not row["email_verified"]:
         raw = create_action_token(row["id"], "verify_email", 60 * 24)
-        print(f"[NEKO EMAIL VERIFICATION] {local_action_url('verify_email', raw)}")
-    return {"ok": True, "message": "If your account needs verification, a new link has been generated. Check the backend terminal during local development."}
+        verification_url = local_action_url("verify_email", raw)
+        sent = await send_verification_email(payload.email, verification_url)
+        if not sent:
+            print(f"[NEKO EMAIL VERIFICATION FALLBACK] {verification_url}")
+    return {"ok": True, "message": "If your account needs verification, a verification email has been sent. Check your inbox or spam folder."}
 
 
 @app.post("/api/auth/login")
